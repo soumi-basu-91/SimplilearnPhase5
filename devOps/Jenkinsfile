@@ -1,0 +1,74 @@
+pipeline {
+    environment {
+        baseImageName = "devops-app"
+        imageName = "yokekhei/${baseImageName}"
+        registryCredential = 'dockerhub_id'
+        dockerImage = ''
+    }
+    agent any
+    tools {
+        // Install the Maven version configured as "M2" and add it to the path.
+        maven "M2"
+    }
+
+    stages {
+        stage('Build') {
+            steps {
+                sh "cd Phase-5 && cd devOps && mvn -DskipTests clean compile package"
+            }
+        }
+        stage('Test') {
+            steps {
+                sh "cd Phase-5 && cd devOps && chmod +x selenium/chromedriver"
+                sh "cd Phase-5 && cd devOps && chmod +x selenium/geckodriver"
+                sh "cd Phase-5 && cd devOps && mvn test"
+            }
+
+            post {
+                success {
+                    junit 'Phase-5/devOps/target/surefire-reports/TEST-*.xml'
+                    step([$class: 'Publisher', reportFilenamePattern: 'Phase-5/devOps/target/surefire-reports/testng-results.xml'])
+                }
+            }
+        }
+        stage('Build Docker Image') {
+            steps {
+                script {
+                    dockerImage = docker.build("${imageName}:${BUILD_NUMBER}", "-f Phase-5/devOps/JenkinsDockerfile .")
+                }
+            }
+        }
+        stage('Publish Docker Image') {
+            steps {
+                script {
+                    docker.withRegistry('', registryCredential) {
+                        dockerImage.push("${BUILD_NUMBER}")
+                        dockerImage.push('latest')
+                    }
+                }
+            }
+        }
+        stage('Deploy to AWS EC2 Instance') {
+            steps([$class: 'BapSshPromotionPublisherPlugin']) {
+                sshPublisher(
+                    continueOnError: false, failOnError: true,
+                    publishers: [
+                        sshPublisherDesc(
+                            configName: "web-app-server",
+                            verbose: true,
+                            transfers: [
+                                sshTransfer(execCommand: "docker kill \$(docker container ls -a | grep ${baseImageName} | awk '{print \$1}');docker rm \$(docker container ls -a | grep ${baseImageName} | awk '{print \$1}');docker rmi \$(docker image ls -a | grep ${baseImageName} | awk '{print \$3}');docker run -it --rm -d -p 8443:8443 ${imageName}:${BUILD_NUMBER};exit 0;"),
+                            ]
+                        )
+                    ]
+                )
+            }
+        }
+        stage('Clean up') {
+            steps {
+                sh "docker rmi ${imageName}:${BUILD_NUMBER}"
+                sh "docker rmi ${imageName}:latest"
+            }
+        }
+    }
+}
